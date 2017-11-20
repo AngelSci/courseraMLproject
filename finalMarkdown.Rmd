@@ -1,0 +1,183 @@
+---
+title: "Machine Learning Project"
+author: "Angel Ault"
+date: "November 20, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(caret)
+library(ggplot2)
+library(dplyr)
+library(rattle)
+set.seed(53280)
+```
+
+## Project Summary: 
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit, it is now possible to collect a large amount of data about personal activity relatively inexpensively. These devices contain sensors that are capable of recording raw biometric data to monitor three-dimensional movement or positioning with a high precision and accuracy. 
+
+For this study, we will use biometric data to predict what type of exercise the subject is doing. We will apply machine learning algorithms to train our model based on biometric data collected from six subjects as they performed five different types of exercise. These exercises are defined in the dataset under the field **classe**
+
+Our model will be cross-validated to determine it's accuracy, kappa score, confidence level, and confidence interval. Lastly, we will apply the model to predict 20 different test cases.
+
+### Setup
+
+Download the data from its web repository.
+```{r downloadData}
+#The source data URLs
+trainingURL <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv'
+testingURL <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv'
+#download the data top a local folder
+download.file(url=trainingURL, destfile = 'pml-training.csv')
+download.file(url=testingURL, destfile = 'pml-testing.csv')
+```
+
+Load the datasets.
+```{r loadData }
+#load the training dataset
+trainingData <- read.csv('pml-training.csv')
+#load the validation data we will use to predict classe
+validation <- read.csv('pml-testing.csv')
+str(trainingData)
+```
+
+### Data Cleanup
+
+Our data contains a lot of NA values. Let's remove them. 
+```{r cleanData}
+#Clean up the NA values
+#find which fields do not contain NA data
+goodFields <- seq(1:160)*c(!is.na(trainingData[1,]))
+#create a list of fields that contain usable data
+useFields <- goodFields[goodFields!=0]
+#select out only the fields in the data that are not NA
+trainingData <- select(trainingData,useFields)
+#remove the NA values from the validation data
+validation <- select(validation,useFields)
+```
+
+### Exploratory Analysis
+
+So that we can cross-validate our models, we will partition the trainingData into two sets, training data and testing data with a 70%-30% split.
+```{r partitionData}
+inTrain <- createDataPartition(y=trainingData$classe,p=0.7,list=F)
+training <- trainingData[inTrain,]
+testing <- trainingData[-inTrain,]
+```
+
+Machine learning models take a lot of computations. How big is our training data?
+```{r getSize}
+#how many records are in our traiing data?
+dim(training)
+```
+13,737 records and 93 fields is a lot of data to explore to find a good model.
+
+Trying out models on all of the training data is computationally expensive because there are so many variables!
+
+Let's make some smaller subsets of the data to speed up computation time and try different models
+```{r smallData}
+smallTraining <- training[createDataPartition(training$classe,p=0.1,list=F),]
+smallTesting <-  training[createDataPartition(training$classe,p=0.07,list=F),]
+print(dim(smallTraining))
+print(dim(smallTesting))
+```
+1376 records for training data is much more manageable, as are 964 records for test data also more manageable. Can we remove any fields that won't help our model?
+
+```{r data_to_remove}
+names(training)[1:7]
+```
+We'll leave out the first seven fields as these are the id, user, window, and datetime data.
+
+We don't know yet which of the 84 remaining fields are useful predictors, so to start off we will use all of them to make our first model.
+
+Let's try making a decision tree model.
+```{r decisionTree}
+modFit <- train(classe~.,data=smallTraining[,8:93],method='rpart')
+```
+
+Now let's see how well this model performs on our smallTesting data
+```{r predictSmallTesting}
+pred <- predict(modFit,smallTesting)
+confusionMatrix(smallTesting$classe,pred)
+```
+
+With an accuracy between 48.35%-54.75% (at 95% confidence) and a kappa score of 0.3927, this is a weak model.
+
+But it may key us in on what fields in the data make good predictors. Let's look at which fields this model used to classify our data.
+```{r whichfields}
+modFit$finalModel
+```
+
+Even better, let's visualize the decision tree
+```{r visualizeTree}
+fancyRpartPlot(modFit$finalModel,sub='Exploratory Decision tree')
+```
+
+So, which fields, according to this model, make the best predictors? Let's list the top 15
+```{r top15Predictors}
+importance <- varImp(modFit)
+importantVariables <- rownames(data.frame(importance$importance))[1:15]
+importantVariables
+```
+
+So now that we have some idea which fields make good predictors, let's trim our dataset's fields down to just these 15 and the dependent field, classe
+```{r trimData}
+fittedTraining <- select(smallTraining,c(importantVariables,'classe'))
+```
+
+### Model Selection
+
+Now that the dataset is smaller (1376 rows x 16 fields), let's try a computationally expensive model, like random forest, using only these 15 variables as predictors.
+
+```{r smallRF, warning=FALSE}
+modFit2 <- train(classe~.,data=fittedTraining,method='rf')
+```
+
+```{r smallCrossValidation}
+pred2 <- predict(modFit2,smallTesting)
+confusionMatrix(smallTesting$classe,pred2)
+```
+
+An accuracy of 91.14%-94.48% (at 95% confidence) and a Kappa score of 0.9108 means this is a very strong model! 
+
+The Random Forest model works very well on our small training data. We will select this model for our analysis.
+
+So, time to scale it up.
+Now let's go back to the full training dataset, trim the fields down to these 15 fields, and run a random forest model.
+
+```{r trimTrainingData}
+#Use a smaller amount of variables based on the useful predictors found in our decision tree model
+fittedTraining <- select(training,c(importantVariables,'classe'))
+#Create a Random forest model
+modFit3 <- train(classe~.,data=fittedTraining,method='rf')
+```
+
+How well did the model do to predict classe on the training data?
+```{r trainingSelfAccuracy}
+confusionMatrix(training$classe,predict(modFit3,training))
+```
+
+### Cross Validation 
+
+The training data perfectly predicts the data it was trained on. There is a good chance that this model is overfitted. If so, a cross-validation where we apply to the model to the testing dataset will reflect this. We should expect a lower accuracy and kappa value when we predict using the testing data. 
+```{r crossValidation}
+pred3 <- predict(modFit3,testing)
+confusionMatrix(testing$classe,pred3)
+```
+
+An out of sample accuracy of 98.73%-99.25% at 95% confidence is very (unusually) strong!
+Also, a kappa score of 0.9875 is really strong.
+Based on our cross validation, we can say that our predictions on the validation set are ~95% correct with 95% confidence
+
+### Prediction 
+
+Let's finally use the data in the validation set and predict what classe (type of exercise) each record best reflects.
+```{r predictExercise}
+predVal <- predict(modFit3,validation)
+predVal
+```
+
+### Conclusion
+
+By using exploratory data analysis, we were able to find which 15 variables made the best predictors to determine types of exercise. By trimming the data to a small sample size of 1376 records x 16 fields, we were able to test the viability of a computationally expensive random forest model and, based on its high accuracy and kappa score, determine that is was a strong, if not the best, model to use to predict types of exercise. After applying the random forest model to our training data, we cross-validated the model with a surprisingly high 98.73%-99.25% accuracy at 95% confidence. Lastly, we can conclude that, with an out of sample error of ~2%, the model is extremely confident in predicting the types of exercises performed in the 20 test cases provided in the validation data.
